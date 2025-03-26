@@ -46,12 +46,12 @@ const ProposalsTab = ({
   proposals, 
   createProposal, 
   cancelProposal, 
-  queueProposalWithThreatLevel,
+  queueProposal,
   executeProposal, 
   claimRefund,
   loading: globalLoading,
   contracts,
-  fetchProposals, // Add this prop to ensure we can access fetchProposals
+  fetchProposals, // Access to fetchProposals
   account // Current user's wallet address
 }) => {
   const [proposalType, setProposalType] = useState('all');
@@ -70,16 +70,16 @@ const ProposalsTab = ({
     newThreshold: '',
     newQuorum: '',
     newVotingDuration: '',
-    newTimelockDelay: ''
+    newProposalStake: '' // Changed from newTimelockDelay to newProposalStake
   });
   const [submitting, setSubmitting] = useState(false);
   const [transactionError, setTransactionError] = useState('');
   
-  // New state for tracking transaction status
+  // Transaction status tracking
   const [pendingTxs, setPendingTxs] = useState({});
   const [loading, setLoading] = useState(globalLoading);
   
-  // Clear errors when component unmounts or when dependencies change
+  // Clear errors when component unmounts or dependencies change
   useEffect(() => {
     return () => {
       setTransactionError('');
@@ -152,21 +152,20 @@ const ProposalsTab = ({
     setTimeout(() => setCopiedText(null), 2000);
   };
 
+  // Enhanced renderAddress function for better display
   const renderAddress = (address, label) => {
-    const isExpanded = true; // Always show copy button for addresses in expanded view
     return (
-      <div className="flex items-center">
+      <div className="flex items-center mb-2">
         <span className="font-medium mr-2">{label}:</span>
-        <span className="font-mono break-all">{address}</span>
-        {isExpanded && (
-          <button 
-            onClick={() => copyToClipboard(address)} 
-            className="ml-2 text-gray-500 hover:text-indigo-600 focus:outline-none"
-            title="Copy to clipboard"
-          >
-            <Copy className="w-4 h-4" />
-          </button>
-        )}
+        <span className="font-mono text-sm break-all">{address}</span>
+        <button 
+          onClick={() => copyToClipboard(address)} 
+          className="ml-2 text-gray-500 hover:text-indigo-600 focus:outline-none"
+          title="Copy to clipboard"
+          aria-label={`Copy ${label} address`}
+        >
+          {copiedText === address ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
+        </button>
         {copiedText === address && (
           <span className="ml-2 text-xs text-green-600">Copied!</span>
         )}
@@ -216,14 +215,37 @@ const ProposalsTab = ({
     setTransactionError('');
     
     try {
-      const description = `${newProposal.title}\n\n${newProposal.description}`;
+      // For governance change proposals, include the parameters in the description for backup parsing
+      let description = `${newProposal.title}\n\n${newProposal.description}`;
+      
+      // Add parameter details to description for governance changes to ensure they can be parsed later
+      if (parseInt(newProposal.type) === PROPOSAL_TYPES.GOVERNANCE_CHANGE) {
+        const paramDetails = [];
+        
+        if (newProposal.newThreshold) {
+          paramDetails.push(`Threshold: ${newProposal.newThreshold}`);
+        }
+        if (newProposal.newQuorum) {
+          paramDetails.push(`Quorum: ${newProposal.newQuorum}`);
+        }
+        if (newProposal.newVotingDuration) {
+          paramDetails.push(`Duration: ${newProposal.newVotingDuration}`);
+        }
+        if (newProposal.newProposalStake) {
+          paramDetails.push(`Stake: ${newProposal.newProposalStake}`);
+        }
+        
+        if (paramDetails.length > 0) {
+          description += "\n\nParameters:\n" + paramDetails.join("\n");
+        }
+      }
       
       // Convert values to proper format
       const amount = newProposal.amount ? ethers.utils.parseEther(newProposal.amount.toString()) : 0;
       const newThreshold = newProposal.newThreshold ? ethers.utils.parseEther(newProposal.newThreshold.toString()) : 0;
       const newQuorum = newProposal.newQuorum ? ethers.utils.parseEther(newProposal.newQuorum.toString()) : 0;
       const newVotingDuration = newProposal.newVotingDuration ? parseInt(newProposal.newVotingDuration) : 0;
-      const newTimelockDelay = newProposal.newTimelockDelay ? parseInt(newProposal.newTimelockDelay) : 0;
+      const newProposalStake = newProposal.newProposalStake ? ethers.utils.parseEther(newProposal.newProposalStake.toString()) : 0; // Changed
       
       // Validate inputs based on proposal type
       if (!validateProposalInputs(newProposal)) {
@@ -243,8 +265,15 @@ const ProposalsTab = ({
         newThreshold,
         newQuorum,
         newVotingDuration,
-        newTimelockDelay
+        newProposalStake // Changed
       });
+      
+      // For governance change proposals, use the proposal stake
+      // For other proposals, timelock delay is still used for the final parameter
+      // but with governance change proposals, this field is repurposed as proposalStake
+      const finalParamValue = parseInt(newProposal.type) === PROPOSAL_TYPES.GOVERNANCE_CHANGE 
+        ? newProposalStake 
+        : 0;
       
       await createProposal(
         description,
@@ -257,7 +286,7 @@ const ProposalsTab = ({
         newThreshold,
         newQuorum,
         newVotingDuration,
-        newTimelockDelay
+        finalParamValue // Using proposalStake for governance changes, 0 for others
       );
       
       setShowCreateModal(false);
@@ -274,13 +303,39 @@ const ProposalsTab = ({
         newThreshold: '',
         newQuorum: '',
         newVotingDuration: '',
-        newTimelockDelay: ''
+        newProposalStake: '' // Changed
       });
     } catch (error) {
       console.error("Error creating proposal:", error);
       setTransactionError(error.message || 'Error creating proposal. See console for details.');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  // Enhanced function to extract governance parameters directly from rawDescription
+  const extractGovernanceParams = (rawDescription, proposalType) => {
+    // Only process for governance change proposals
+    if (parseInt(proposalType) !== PROPOSAL_TYPES.GOVERNANCE_CHANGE) {
+      return null;
+    }
+    
+    try {
+      // Try to extract parameters from description text using regex patterns
+      const thresholdMatch = rawDescription?.match(/threshold[:\s]+([0-9.]+)/i);
+      const quorumMatch = rawDescription?.match(/quorum[:\s]+([0-9.]+)/i);
+      const durationMatch = rawDescription?.match(/duration[:\s]+([0-9.]+)/i);
+      const stakeMatch = rawDescription?.match(/stake[:\s]+([0-9.]+)/i);
+      
+      return {
+        newThreshold: thresholdMatch ? thresholdMatch[1] : null,
+        newQuorum: quorumMatch ? quorumMatch[1] : null,
+        newVotingDuration: durationMatch ? durationMatch[1] : null, 
+        newProposalStake: stakeMatch ? stakeMatch[1] : null
+      };
+    } catch (error) {
+      console.error("Error extracting governance params from description:", error);
+      return null;
     }
   };
 
@@ -297,9 +352,11 @@ const ProposalsTab = ({
         return proposal.recipient && proposal.amount;
       
       case PROPOSAL_TYPES.GOVERNANCE_CHANGE:
-        // At least one parameter must be changed
-        return proposal.newThreshold || proposal.newQuorum || 
-               proposal.newVotingDuration || proposal.newTimelockDelay;
+        // At least one parameter must be changed and have a non-zero/non-empty value
+        return (proposal.newThreshold && parseFloat(proposal.newThreshold) > 0) || 
+               (proposal.newQuorum && parseFloat(proposal.newQuorum) > 0) || 
+               (proposal.newVotingDuration && parseInt(proposal.newVotingDuration) > 0) || 
+               (proposal.newProposalStake && parseFloat(proposal.newProposalStake) > 0);
       
       case PROPOSAL_TYPES.EXTERNAL_ERC20_TRANSFER:
         return proposal.recipient && proposal.token && proposal.amount;
@@ -338,8 +395,7 @@ const ProposalsTab = ({
           throw new Error("Governance contract not initialized");
         }
 
-        // IMPORTANT: We need to use the correct governance function to queue the proposal
-        // This should directly call the governance contract's queueProposal function
+        // Call the governance contract's queueProposal function
         const provider = new ethers.providers.Web3Provider(window.ethereum);
         const signer = provider.getSigner();
         const governance = contracts.governance.connect(signer);
@@ -359,7 +415,7 @@ const ProposalsTab = ({
           const gasEstimate = await governance.estimateGas.queueProposal(proposalId)
             .catch(e => {
               console.warn("Gas estimation failed for queueProposal:", e);
-              return ethers.utils.hexlify(4000000); // Fallback to 1M gas
+              return ethers.utils.hexlify(4000000); // Fallback to 4M gas
             });
             
           // Add buffer to gas estimate
@@ -781,7 +837,7 @@ const ProposalsTab = ({
     }
   });
 
-  // Render transaction notifications
+  // Improved transaction notification card with better error message handling
   const renderTransactionNotifications = () => {
     const txEntries = Object.entries(pendingTxs);
     if (txEntries.length === 0) return null;
@@ -807,7 +863,7 @@ const ProposalsTab = ({
                   <AlertTriangle className="h-8 w-8 text-red-500" />
                 )}
               </div>
-              <div className="ml-4 flex-1">
+              <div className="ml-4 flex-1 overflow-hidden">
                 <p className="text-lg font-semibold text-gray-900">
                   {tx.status === 'pending' ? 'Transaction in Progress' :
                    tx.status === 'success' ? 'Transaction Successful' :
@@ -818,11 +874,19 @@ const ProposalsTab = ({
                     ? `${tx.action} proposal #${tx.proposalId}...` 
                     : tx.status === 'success'
                     ? `Successfully ${tx.action} proposal #${tx.proposalId}`
-                    : `Error ${tx.action} proposal #${tx.proposalId}: ${tx.error || 'Unknown error'}`
+                    : `Failed ${tx.action} proposal #${tx.proposalId}`
                   }
                 </p>
+                {/* Improved error message display with better wrapping */}
+                {tx.error && (
+                  <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded-md">
+                    <p className="text-sm text-red-700 break-words">
+                      {tx.error}
+                    </p>
+                  </div>
+                )}
                 {tx.warning && (
-                  <p className="mt-2 text-base text-yellow-600 font-medium">{tx.warning}</p>
+                  <p className="mt-2 text-sm text-yellow-600 font-medium break-words">{tx.warning}</p>
                 )}
                 <div className="mt-3 flex flex-wrap gap-2">
                   {tx.hash && (
@@ -847,7 +911,7 @@ const ProposalsTab = ({
                         
                         // Then retry with higher gas parameters
                         handleProposalAction(
-                          tx.action === 'queuing' ? queueProposalWithThreatLevel : 
+                          tx.action === 'queuing' ? queueProposal : 
                           tx.action === 'cancelling' ? cancelProposal :
                           tx.action === 'executing' ? executeProposal : claimRefund,
                           tx.proposalId,
@@ -884,6 +948,27 @@ const ProposalsTab = ({
         ))}
       </div>
     );
+  };
+
+  // Check if user can claim a refund (improved conditional logic)
+  const canClaimRefund = (proposal) => {
+    if (!account || !proposal) return false;
+    
+    // Check if the user is the proposer
+    const isProposer = account.toLowerCase() === proposal.proposer.toLowerCase();
+    if (!isProposer) return false;
+    
+    // Check if stake has already been refunded
+    if (proposal.stakeRefunded) return false;
+    
+    // Check if proposal is in a refundable state
+    const refundableStates = [
+      PROPOSAL_STATES.DEFEATED, 
+      PROPOSAL_STATES.CANCELED, 
+      PROPOSAL_STATES.EXPIRED
+    ];
+    
+    return refundableStates.includes(proposal.state);
   };
 
   return (
@@ -958,15 +1043,20 @@ const ProposalsTab = ({
               <div className="border-t pt-4 mb-4">
                 {expandedProposalId === proposal.id ? (
                   <div>
-                    <p className="text-sm text-gray-700 mb-2">{proposal.description}</p>
+                    <p className="text-sm text-gray-700 mb-4">{proposal.description}</p>
                     <div className="mt-4 border-t pt-4">
-                      <h4 className="font-medium mb-2">Proposal Details</h4>
+                      <h4 className="font-medium mb-3">Proposal Details</h4>
+                      {/* Display proposer address in full with copy button */}
+                      {renderAddress(proposal.proposer, "Proposer")}
+                      
                       {/* Display proposal-specific details */}
                       {proposal.type === PROPOSAL_TYPES.GENERAL && (
-                        <div className="mt-2 text-xs bg-gray-50 p-4 rounded">
+                        <div className="mt-2 bg-gray-50 p-4 rounded">
                           {renderAddress(proposal.target, "Target")}
-                          <p className="mt-2 font-medium">Call Data:</p>
-                          <pre className="bg-gray-100 p-2 mt-1 rounded overflow-x-auto">{proposal.callData}</pre>
+                          <div className="mt-2">
+                            <p className="font-medium mb-1">Call Data:</p>
+                            <pre className="bg-gray-100 p-2 mt-1 rounded overflow-x-auto text-xs">{proposal.callData}</pre>
+                          </div>
                         </div>
                       )}
                       
@@ -974,26 +1064,153 @@ const ProposalsTab = ({
                         proposal.type === PROPOSAL_TYPES.TOKEN_TRANSFER || 
                         proposal.type === PROPOSAL_TYPES.TOKEN_MINT || 
                         proposal.type === PROPOSAL_TYPES.TOKEN_BURN) && (
-                        <div className="mt-2 text-xs bg-gray-50 p-4 rounded">
+                        <div className="mt-2 bg-gray-50 p-4 rounded">
                           {renderAddress(proposal.recipient, "Recipient")}
-                          <p className="mt-2"><span className="font-medium">Amount:</span> {typeof proposal.amount === 'string' ? proposal.amount : formatBigNumber(proposal.amount)} {proposal.type === PROPOSAL_TYPES.WITHDRAWAL ? 'ETH' : 'JUST'}</p>
+                          <p className="mt-2 flex items-center">
+                            <span className="font-medium mr-2">Amount:</span> 
+                            {typeof proposal.amount === 'string' ? proposal.amount : formatBigNumber(proposal.amount)} 
+                            {proposal.type === PROPOSAL_TYPES.WITHDRAWAL ? ' ETH' : ' JUST'}
+                          </p>
                         </div>
                       )}
                       
                       {proposal.type === PROPOSAL_TYPES.EXTERNAL_ERC20_TRANSFER && (
-                        <div className="mt-2 text-xs bg-gray-50 p-4 rounded">
+                        <div className="mt-2 bg-gray-50 p-4 rounded">
                           {renderAddress(proposal.recipient, "Recipient")}
                           {renderAddress(proposal.token, "Token")}
-                          <p className="mt-2"><span className="font-medium">Amount:</span> {typeof proposal.amount === 'string' ? proposal.amount : formatBigNumber(proposal.amount)}</p>
+                          <p className="mt-2 flex items-center">
+                            <span className="font-medium mr-2">Amount:</span> 
+                            {typeof proposal.amount === 'string' ? proposal.amount : formatBigNumber(proposal.amount)}
+                          </p>
                         </div>
                       )}
                       
                       {proposal.type === PROPOSAL_TYPES.GOVERNANCE_CHANGE && (
-                        <div className="mt-2 text-xs bg-gray-50 p-4 rounded">
-                          {proposal.newThreshold && <p><span className="font-medium">New Threshold:</span> {formatBigNumber(proposal.newThreshold)}</p>}
-                          {proposal.newQuorum && <p className="mt-2"><span className="font-medium">New Quorum:</span> {formatBigNumber(proposal.newQuorum)}</p>}
-                          {proposal.newVotingDuration && <p className="mt-2"><span className="font-medium">New Voting Duration:</span> {formatTime(proposal.newVotingDuration)}</p>}
-                          {proposal.newTimelockDelay && <p className="mt-2"><span className="font-medium">New Timelock Delay:</span> {formatTime(proposal.newTimelockDelay)}</p>}
+                        <div className="mt-2 bg-gray-50 p-4 rounded">
+                          {/* Display governance parameters with debug info */}
+                          <div>
+                            {/* First try to extract parameters from description if standard fields are missing */}
+                            {proposal.type === PROPOSAL_TYPES.GOVERNANCE_CHANGE && (
+                              <div>
+                                {/* Try to parse parameters from description */}
+                                {(() => {
+                                  // Extract governance parameters from description if they're not in the data
+                                  const hasStandardParams = 
+                                    proposal.newThreshold || 
+                                    proposal.newQuorum || 
+                                    proposal.newVotingDuration || 
+                                    proposal.newProposalStake || 
+                                    proposal.newTimelockDelay;
+                                    
+                                  // If no standard params, check description
+                                  if (!hasStandardParams && proposal.description) {
+                                    // Look for parameter patterns in the description
+                                    const thresholdMatch = proposal.description.match(/threshold[:\s]+([0-9.]+)/i);
+                                    const quorumMatch = proposal.description.match(/quorum[:\s]+([0-9.]+)/i);
+                                    const durationMatch = proposal.description.match(/duration[:\s]+([0-9.]+)/i);
+                                    const stakeMatch = proposal.description.match(/stake[:\s]+([0-9.]+)/i);
+                                    
+                                    // If found any parameters, render them
+                                    if (thresholdMatch || quorumMatch || durationMatch || stakeMatch) {
+                                      return (
+                                        <>
+                                          {thresholdMatch && (
+                                            <p className="mb-2 flex items-center">
+                                              <span className="font-medium mr-2">New Proposal Threshold:</span> 
+                                              {thresholdMatch[1]} JUST
+                                            </p>
+                                          )}
+                                          
+                                          {quorumMatch && (
+                                            <p className="mb-2 flex items-center">
+                                              <span className="font-medium mr-2">New Quorum:</span> 
+                                              {quorumMatch[1]} JUST
+                                            </p>
+                                          )}
+                                          
+                                          {durationMatch && (
+                                            <p className="mb-2 flex items-center">
+                                              <span className="font-medium mr-2">New Voting Duration:</span> 
+                                              {durationMatch[1]} seconds
+                                            </p>
+                                          )}
+                                          
+                                          {stakeMatch && (
+                                            <p className="mb-2 flex items-center">
+                                              <span className="font-medium mr-2">New Proposal Stake:</span> 
+                                              {stakeMatch[1]} JUST
+                                            </p>
+                                          )}
+                                          
+                                          {!(thresholdMatch || quorumMatch || durationMatch || stakeMatch) && (
+                                            <p className="text-gray-500 italic">No parameter changes found in description</p>
+                                          )}
+                                        </>
+                                      );
+                                    }
+                                  }
+                                  
+                                  // If has standard params or couldn't extract from description
+                                  return (
+                                    <>
+                                      <p className="mb-2 flex items-center">
+                                        <span className="font-medium mr-2">New Proposal Threshold:</span> 
+                                        {proposal.newThreshold && !ethers.BigNumber.from("0").eq(
+                                          ethers.BigNumber.from(proposal.newThreshold || "0")
+                                        )
+                                          ? formatBigNumber(proposal.newThreshold)
+                                          : "No Change"}
+                                      </p>
+                                      <p className="mb-2 flex items-center">
+                                        <span className="font-medium mr-2">New Quorum:</span> 
+                                        {proposal.newQuorum && !ethers.BigNumber.from("0").eq(
+                                          ethers.BigNumber.from(proposal.newQuorum || "0")
+                                        )
+                                          ? formatBigNumber(proposal.newQuorum)
+                                          : "No Change"}
+                                      </p>
+                                      <p className="mb-2 flex items-center">
+                                        <span className="font-medium mr-2">New Voting Duration:</span> 
+                                        {proposal.newVotingDuration && parseInt(proposal.newVotingDuration || "0") > 0
+                                          ? formatTime(proposal.newVotingDuration)
+                                          : "No Change"}
+                                      </p>
+                                      <p className="mb-2 flex items-center">
+                                        <span className="font-medium mr-2">New Proposal Stake:</span> 
+                                        {proposal.newProposalStake && !ethers.BigNumber.from("0").eq(
+                                          ethers.BigNumber.from(proposal.newProposalStake || "0")
+                                        )
+                                          ? formatBigNumber(proposal.newProposalStake)
+                                          : proposal.newTimelockDelay && !ethers.BigNumber.from("0").eq(
+                                              ethers.BigNumber.from(proposal.newTimelockDelay || "0")
+                                            )
+                                            ? formatBigNumber(proposal.newTimelockDelay) 
+                                            : "No Change"}
+                                      </p>
+                                    </>
+                                  );
+                                })()}
+                              </div>
+                            )}
+                          </div>
+                          
+                          {/* Debug section - visible to help troubleshoot */}
+                          <div className="mt-4 p-2 bg-gray-200 text-xs font-mono">
+                            <details>
+                              <summary className="cursor-pointer">Debug Governance Info</summary>
+                              <pre className="whitespace-pre-wrap break-all">
+                                {JSON.stringify({
+                                  threshold: proposal.newThreshold?.toString() || 'undefined',
+                                  quorum: proposal.newQuorum?.toString() || 'undefined',
+                                  votingDuration: proposal.newVotingDuration?.toString() || 'undefined',
+                                  timelockDelay: proposal.newTimelockDelay?.toString() || 'undefined',
+                                  proposalStake: proposal.newProposalStake?.toString() || 'undefined',
+                                  description: proposal.description?.substring(0, 100) + '...',
+                                  parsedParams: extractGovernanceParams(proposal.description, proposal.type),
+                                }, null, 2)}
+                              </pre>
+                            </details>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -1029,7 +1246,7 @@ const ProposalsTab = ({
                 {proposal.state === PROPOSAL_STATES.SUCCEEDED && !proposal.isQueued && (
                   <button 
                     className="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded-md text-sm"
-                    onClick={() => handleProposalAction(queueProposalWithThreatLevel, proposal.id, 'queuing')}
+                    onClick={() => handleProposalAction(queueProposal, proposal.id, 'queuing')}
                     disabled={loading}
                   >
                     Queue
@@ -1047,13 +1264,8 @@ const ProposalsTab = ({
                   </button>
                 )}
                 
-                {/* Only show Claim Refund button to the proposer and if stake is not already refunded */}
-                {(proposal.state === PROPOSAL_STATES.DEFEATED || 
-                  proposal.state === PROPOSAL_STATES.CANCELED || 
-                  proposal.state === PROPOSAL_STATES.EXPIRED) && 
-                 account && 
-                 account.toLowerCase() === proposal.proposer.toLowerCase() && 
-                 !proposal.stakeRefunded && (
+                {/* Improved conditional rendering for claim refund button */}
+                {canClaimRefund(proposal) && (
                   <button 
                     className="bg-gray-500 hover:bg-gray-600 text-white px-3 py-1 rounded-md text-sm"
                     onClick={() => handleProposalAction(claimRefund, proposal.id, 'claiming refund for')}
@@ -1325,7 +1537,7 @@ const ProposalsTab = ({
                 </>
               )}
               
-              {/* Fields for GOVERNANCE_CHANGE proposal type */}
+              {/* Fields for GOVERNANCE_CHANGE proposal type - UPDATED */}
               {parseInt(newProposal.type) === PROPOSAL_TYPES.GOVERNANCE_CHANGE && (
                 <>
                   <div>
@@ -1364,15 +1576,16 @@ const ProposalsTab = ({
                     <p className="text-xs text-gray-500 mt-1">The new duration of the voting period in seconds</p>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">New Timelock Delay</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">New Proposal Stake</label>
                     <input 
                       type="number"
+                      step="0.000000000000000001"
                       className="w-full rounded-md border border-gray-300 p-2" 
-                      placeholder="New timelock delay (in seconds)" 
-                      value={newProposal.newTimelockDelay}
-                      onChange={(e) => setNewProposal({...newProposal, newTimelockDelay: e.target.value})}
+                      placeholder="New proposal stake (in JUST tokens)" 
+                      value={newProposal.newProposalStake}
+                      onChange={(e) => setNewProposal({...newProposal, newProposalStake: e.target.value})}
                     />
-                    <p className="text-xs text-gray-500 mt-1">The new delay before a proposal can be executed in seconds</p>
+                    <p className="text-xs text-gray-500 mt-1">The new amount of JUST tokens required as stake when creating a proposal</p>
                   </div>
                 </>
               )}
