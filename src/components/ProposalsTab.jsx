@@ -1,4 +1,3 @@
-// src/components/ProposalsTab.js - Updated with all fixes
 import React, { useState, useEffect } from 'react';
 import { ethers } from 'ethers';
 import { PROPOSAL_STATES, PROPOSAL_TYPES } from '../utils/constants';
@@ -52,8 +51,8 @@ const ProposalsTab = ({
   claimRefund,
   loading: globalLoading,
   contracts,
-  fetchProposals,
-  account
+  fetchProposals, // Add this prop to ensure we can access fetchProposals
+  account // Current user's wallet address
 }) => {
   const [proposalType, setProposalType] = useState('all');
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -334,88 +333,7 @@ const ProposalsTab = ({
     }));
     
     try {
-      if (actionName === 'executing') {
-        if (!contracts.governance) {
-          throw new Error("Governance contract not initialized");
-        }
-
-        // Find the proposal by ID - with improved error handling
-        const proposal = proposals.find(p => p.id === Number(proposalId));
-        if (!proposal) {
-          console.error(`Proposal #${proposalId} not found in local state`);
-          // Try to verify if the proposal exists on-chain before giving up
-          try {
-            // This will throw if the proposal doesn't exist
-            const state = await contracts.governance.getProposalState(proposalId);
-            console.log(`Proposal #${proposalId} exists on-chain with state: ${getProposalStateLabel(state)}`);
-            
-            // If we reach here, the proposal exists on-chain but not in our local state
-            alert(`Proposal #${proposalId} exists on-chain but not in local state. Attempting to execute anyway.`);
-          } catch (stateErr) {
-            console.error("Error checking proposal state:", stateErr);
-            alert(`Error: Proposal #${proposalId} not found. Please refresh the page and try again.`);
-            throw new Error(`Proposal #${proposalId} not found in local state or on-chain`);
-          }
-        } else {
-          console.log(`Executing proposal #${proposalId} - ${proposal.title}`);
-          console.log(`Current state: ${proposal.stateLabel}`);
-          
-          // Check if the proposal is in the right state
-          if (proposal.stateLabel.toLowerCase() !== 'queued') {
-            const errorMsg = `Proposal must be in Queued state to execute. Current state: ${proposal.stateLabel}`;
-            alert(`Error: ${errorMsg}`);
-            throw new Error(errorMsg);
-          }
-        }
-
-        // Add a confirmation dialog
-        const confirmed = window.confirm(
-          `You are about to execute proposal #${proposalId}.\n\n` +
-          `This will trigger the transaction specified in the proposal and cannot be undone.\n\n` +
-          `Proceed?`
-        );
-
-        if (!confirmed) {
-          throw new Error("Execution cancelled by user");
-        }
-
-        // Show feedback to user before sending transaction
-        alert(`Preparing to execute proposal #${proposalId}.\n\nPlease confirm the transaction in your wallet and be patient. This operation may take some time to complete.`);
-
-        // Use the executeProposal function directly from the hook
-        const result = await executeProposal(proposalId);
-        
-        console.log("Execution result:", result);
-        
-        // Update transaction status on success
-        setPendingTxs(prev => ({
-          ...prev,
-          [txId]: {
-            ...prev[txId],
-            hash: result.hash,
-            status: 'success',
-            lastChecked: Date.now()
-          }
-        }));
-        
-        // Update the proposal's executed status
-        await updateProposalExecutedStatus(proposalId);
-        
-        // Show success message
-        alert(`Proposal #${proposalId} executed successfully! Transaction hash: ${result.hash}`);
-        
-        // Auto-dismiss success notification after some time
-        setTimeout(() => {
-          setPendingTxs(prev => {
-            const updated = {...prev};
-            delete updated[txId];
-            return updated;
-          });
-        }, 5000);
-        
-        return result;
-      } else if (actionName === 'queuing') {
-        // Existing queuing code with the same pattern as above
+      if (actionName === 'queuing') {
         if (!contracts.governance) {
           throw new Error("Governance contract not initialized");
         }
@@ -441,7 +359,7 @@ const ProposalsTab = ({
           const gasEstimate = await governance.estimateGas.queueProposal(proposalId)
             .catch(e => {
               console.warn("Gas estimation failed for queueProposal:", e);
-              return ethers.utils.hexlify(1000000); // Fallback to 1M gas
+              return ethers.utils.hexlify(4000000); // Fallback to 1M gas
             });
             
           // Add buffer to gas estimate
@@ -687,45 +605,107 @@ const ProposalsTab = ({
             throw error;
           }
         }
-      } else if (actionName === 'claiming refund for') {
-        // Enhanced claim refund logic with better error handling
-        console.log(`Attempting to claim refund for proposal ${proposalId}...`);
-      
-        // Verify the proposal exists
+      } else if (actionName === 'executing') {
+        // For execute, we also need to make sure we're calling the right function
+        const provider = new ethers.providers.Web3Provider(window.ethereum);
+        const signer = provider.getSigner();
+        const governance = contracts.governance.connect(signer);
+        
+        console.log(`Executing proposal ${proposalId}...`);
+        
         try {
-          const proposal = proposals.find(p => p.id === Number(proposalId));
-          if (!proposal) {
-            throw new Error("Proposal not found in local state");
-          }
+          // Estimate gas
+          const gasEstimate = await governance.estimateGas.executeProposal(proposalId)
+            .catch(e => {
+              console.warn("Gas estimation failed for executeProposal:", e);
+              return ethers.utils.hexlify(2000000); // 2M gas fallback
+            });
+            
+          const gasLimit = ethers.BigNumber.from(gasEstimate).mul(150).div(100);
+          const gasPrice = (await provider.getGasPrice()).mul(110).div(100); // 10% higher
           
-          console.log("Claiming refund for proposal:", {
-            id: proposal.id,
-            state: proposal.stateLabel,
-            proposer: proposal.proposer,
-            currentAccount: account,
-            isProposer: proposal.proposer?.toLowerCase() === account?.toLowerCase(),
-            stakeRefunded: proposal.stakeRefunded
+          // Execute the proposal
+          const tx = await governance.executeProposal(proposalId, {
+            gasLimit,
+            gasPrice,
+            nonce: await provider.getTransactionCount(await signer.getAddress(), 'latest')
           });
           
-          // Additional validation
-          if (proposal.proposer?.toLowerCase() !== account?.toLowerCase()) {
-            throw new Error("Only the proposal creator can claim a refund");
-          }
+          console.log("Execute transaction sent:", tx.hash);
           
-          if (proposal.stakeRefunded) {
-            throw new Error("The stake for this proposal has already been refunded");
-          }
+          // Update tracking
+          setPendingTxs(prev => ({
+            ...prev,
+            [txId]: {
+              ...prev[txId],
+              hash: tx.hash,
+              status: 'pending',
+              lastChecked: Date.now()
+            }
+          }));
           
-          if (!['defeated', 'canceled', 'expired'].includes(proposal.stateLabel.toLowerCase())) {
-            throw new Error(`Cannot claim refund for a proposal in the ${proposal.stateLabel} state. Only Defeated, Canceled, or Expired proposals are eligible.`);
-          }
-        } catch (err) {
-          console.error("Error in pre-claim validation:", err);
-          throw err;
+          // Monitor transaction
+          const checkInterval = setInterval(async () => {
+            try {
+              const receipt = await provider.getTransactionReceipt(tx.hash);
+              
+              if (receipt) {
+                clearInterval(checkInterval);
+                
+                setPendingTxs(prev => ({
+                  ...prev,
+                  [txId]: {
+                    ...prev[txId],
+                    status: receipt.status ? 'success' : 'failed',
+                    receipt
+                  }
+                }));
+                
+                if (receipt.status) {
+                  console.log("Execute transaction confirmed successfully");
+                  
+                  // Update the proposal's executed status
+                  await updateProposalExecutedStatus(proposalId);
+                  
+                  // Trigger full refresh
+                  if (typeof fetchProposals === 'function') {
+                    setTimeout(() => {
+                      fetchProposals().catch(e => console.error("Error refreshing proposals:", e));
+                    }, 2000);
+                  }
+                  
+                  // Auto-dismiss success notification
+                  setTimeout(() => {
+                    setPendingTxs(prev => {
+                      const updated = {...prev};
+                      delete updated[txId];
+                      return updated;
+                    });
+                  }, 5000);
+                }
+              }
+            } catch (e) {
+              console.warn("Error checking execute transaction:", e);
+            }
+          }, 5000);
+        } catch (error) {
+          console.error("Error executing proposal:", error);
+          
+          setPendingTxs(prev => ({
+            ...prev,
+            [txId]: {
+              ...prev[txId],
+              status: 'failed',
+              error: error.message || 'Error executing proposal',
+              canRetry: retryCount < 3
+            }
+          }));
+          
+          throw error;
         }
-        
-        // Proceed with claim
-        const result = await claimRefund(proposalId);
+      } else if (actionName === 'claiming refund for') {
+        // Special handling for claim refund to update the stakeRefunded status
+        const result = await action(proposalId);
         
         // Update transaction tracking on success
         setPendingTxs(prev => ({
@@ -772,15 +752,6 @@ const ProposalsTab = ({
     } catch (error) {
       console.error(`Error ${actionName} proposal:`, error);
       
-      // Create a detailed error object for debugging
-      const errorDetails = {
-        message: error.message,
-        code: error.code,
-        data: error.data,
-        stack: error.stack
-      };
-      console.error("Full error details:", errorDetails);
-      
       // Update transaction tracking on failure
       setPendingTxs(prev => ({
         ...prev,
@@ -788,61 +759,27 @@ const ProposalsTab = ({
           ...prev[txId],
           status: 'failed',
           error: error.message || `Error ${actionName} proposal`,
-          canRetry: retryCount < 3,
-          errorDetails
+          canRetry: retryCount < 3
         }
       }));
       
-      // Show a more detailed error message
-      let userMessage = `Error ${actionName} proposal: ${error.message || 'Unknown error'}`;
-      
-      // Don't show the alert again if we already showed one in the specific handling
-      if (!error.message?.includes("already alerted")) {
-        alert(userMessage);
-      }
+      // Show user-friendly error message
+      alert(`Error ${actionName} proposal: ${error.message || 'See console for details'}`);
     }
   };
 
-  // Enhanced filtering logic with more aggressive categorization
+  // Filter out proposals based on the selected filter type
   const filteredProposals = proposals.filter(p => {
-    // First normalize the proposal state label to lowercase for consistent comparison
-    const stateLabel = p.stateLabel.toLowerCase();
-    
     if (proposalType === 'all') {
       return true;
-    } 
-    else if (proposalType === 'active') {
-      return stateLabel === 'active';
-    } 
-    else if (proposalType === 'pending') {
-      // Include both pending, succeeded, and queued states in the 'pending' filter
-      return stateLabel === 'pending' || 
-             stateLabel === 'queued' || 
-             stateLabel === 'succeeded';
-    } 
-    else if (proposalType === 'succeeded') {
-      return stateLabel === 'succeeded';
-    }
-    else if (proposalType === 'executed') {
-      return stateLabel === 'executed';
-    }
-    else if (proposalType === 'defeated') {
-      return stateLabel === 'defeated';
-    }
-    else if (proposalType === 'canceled') {
-      return stateLabel === 'canceled';
-    }
-    else if (proposalType === 'expired') {
-      return stateLabel === 'expired';
-    }
-    // Fallback for direct state matching
-    else {
-      return stateLabel === proposalType;
+    } else if (proposalType === 'pending') {
+      // Include both 'pending' and 'queued' states in the 'pending' filter
+      return p.stateLabel.toLowerCase() === 'pending' || p.stateLabel.toLowerCase() === 'queued';
+    } else {
+      // For all other filters, use direct match
+      return p.stateLabel.toLowerCase() === proposalType;
     }
   });
-
-  // Log the filtered proposals to console for debugging
-  console.log(`Filtered to ${proposalType} proposals:`, filteredProposals.length);
 
   // Render transaction notifications
   const renderTransactionNotifications = () => {
@@ -1110,33 +1047,13 @@ const ProposalsTab = ({
                   </button>
                 )}
                 
-                {/* Debug info for claim refund conditions */}
-                {console.log(`Proposal #${proposal.id} refund button conditions:`, {
-                  isDefeatedCanceledOrExpired: (proposal.state === PROPOSAL_STATES.DEFEATED || 
-                    proposal.state === PROPOSAL_STATES.CANCELED || 
-                    proposal.state === PROPOSAL_STATES.EXPIRED),
-                  accountExists: !!account,
-                  proposerExists: !!proposal.proposer,
-                  addressesMatch: account && proposal.proposer ? 
-                    account.toLowerCase() === proposal.proposer.toLowerCase() : false,
-                  stakeRefundedStatus: proposal.stakeRefunded,
-                  shouldShow: (proposal.state === PROPOSAL_STATES.DEFEATED || 
-                    proposal.state === PROPOSAL_STATES.CANCELED || 
-                    proposal.state === PROPOSAL_STATES.EXPIRED) && 
-                    account && 
-                    proposal.proposer && 
-                    account.toLowerCase() === proposal.proposer.toLowerCase() && 
-                    proposal.stakeRefunded === false
-                })}
-                
                 {/* Only show Claim Refund button to the proposer and if stake is not already refunded */}
                 {(proposal.state === PROPOSAL_STATES.DEFEATED || 
                   proposal.state === PROPOSAL_STATES.CANCELED || 
                   proposal.state === PROPOSAL_STATES.EXPIRED) && 
-                  account && 
-                  proposal.proposer && 
-                  account.toLowerCase() === proposal.proposer.toLowerCase() && 
-                  proposal.stakeRefunded === false && (
+                 account && 
+                 account.toLowerCase() === proposal.proposer.toLowerCase() && 
+                 !proposal.stakeRefunded && (
                   <button 
                     className="bg-gray-500 hover:bg-gray-600 text-white px-3 py-1 rounded-md text-sm"
                     onClick={() => handleProposalAction(claimRefund, proposal.id, 'claiming refund for')}
